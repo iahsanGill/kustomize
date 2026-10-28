@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -90,6 +91,85 @@ func TestRootedFSMemoryFilesDoNotExposeWriter(t *testing.T) {
 			require.False(t, writable, "adapter must not expose io.Writer")
 		})
 	}
+}
+
+func TestRootedFSReadDirLargeCount(t *testing.T) {
+	fSys := MakeFsInMemory()
+	root := filepath.Join(Separator, "root")
+	require.NoError(t, fSys.MkdirAll(root))
+	for _, name := range []string{"a.yaml", "b.yaml", "c.yaml"} {
+		require.NoError(t, fSys.WriteFile(filepath.Join(root, name), nil))
+	}
+	rooted, err := NewRootedFS(fSys, root)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rooted.Close()) })
+
+	dir, err := rooted.Open(".")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dir.Close()) })
+	readDir, ok := dir.(fs.ReadDirFile)
+	require.True(t, ok)
+
+	entries, err := readDir.ReadDir(1)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	entries, err = readDir.ReadDir(math.MaxInt)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+}
+
+func TestRootedFSReadFileReturnsIndependentData(t *testing.T) {
+	content := []byte("content")
+	fSys := MakeFsInMemory()
+	root := filepath.Join(Separator, "root")
+	require.NoError(t, fSys.MkdirAll(root))
+	require.NoError(t, fSys.WriteFile(filepath.Join(root, "file.yaml"), content))
+	aliasingFS := &aliasingReadFileSystem{
+		FileSystem: fSys,
+		content:    content,
+	}
+	rooted, err := NewRootedFS(aliasingFS, root)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rooted.Close()) })
+
+	read, err := rooted.ReadFile("file.yaml")
+	require.NoError(t, err)
+	read[0] = '@'
+	require.Equal(t, "content", string(content))
+}
+
+func TestRootedFSMemorySupportsOverlappingOperations(t *testing.T) {
+	fSys := MakeFsInMemory()
+	root := filepath.Join(Separator, "root")
+	require.NoError(t, fSys.MkdirAll(root))
+	require.NoError(t, fSys.WriteFile(filepath.Join(root, "file.yaml"), []byte("content")))
+	rooted, err := NewRootedFS(fSys, root)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rooted.Close()) })
+
+	first, err := rooted.Open("file.yaml")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, first.Close()) })
+	second, err := rooted.Open("file.yaml")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, second.Close()) })
+
+	info, err := rooted.Stat("file.yaml")
+	require.NoError(t, err)
+	require.Equal(t, int64(len("content")), info.Size())
+	entries, err := rooted.ReadDir(".")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "file.yaml", entries[0].Name())
+}
+
+type aliasingReadFileSystem struct {
+	FileSystem
+	content []byte
+}
+
+func (f *aliasingReadFileSystem) ReadFile(string) ([]byte, error) {
+	return f.content, nil
 }
 
 func forceMetadataUpdateOnWindows(t *testing.T, root string) {
