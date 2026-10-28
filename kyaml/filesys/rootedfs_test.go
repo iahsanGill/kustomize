@@ -181,7 +181,10 @@ func forceMetadataUpdateOnWindows(t *testing.T, root string) {
 	// Directory enumeration and Stat can temporarily observe different MFT metadata.
 	// Rewriting the current timestamp synchronizes them before fstest.TestFS compares them.
 	// See https://go.dev/issue/42637.
-	require.NoError(t, filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	rootFS, err := os.OpenRoot(root)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rootFS.Close()) })
+	require.NoError(t, fs.WalkDir(rootFS.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("failed to walk %q: %w", path, err)
 		}
@@ -189,14 +192,14 @@ func forceMetadataUpdateOnWindows(t *testing.T, root string) {
 		if err != nil {
 			return fmt.Errorf("failed to get directory entry info for %q: %w", path, err)
 		}
-		statInfo, err := os.Stat(path)
+		statInfo, err := rootFS.Stat(path)
 		if err != nil {
 			return fmt.Errorf("failed to stat %q: %w", path, err)
 		}
 		if entryInfo.ModTime() == statInfo.ModTime() {
 			return nil
 		}
-		if err := os.Chtimes(path, statInfo.ModTime(), statInfo.ModTime()); err != nil {
+		if err := rootFS.Chtimes(path, statInfo.ModTime(), statInfo.ModTime()); err != nil {
 			return fmt.Errorf("failed to synchronize metadata for %q: %w", path, err)
 		}
 		return nil
